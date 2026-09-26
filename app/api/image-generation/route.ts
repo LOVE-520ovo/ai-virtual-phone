@@ -291,6 +291,76 @@ async function runNovelAiGeneration(input: ImageGenerationRequest): Promise<{ st
   }
 }
 
+// 302.AI 专用：参考图（编辑）走官方异步格式通道。
+// OpenAI 式 /images/edits 在 302.AI 不被支持（会返回 -10003 参数错误）。
+const is302Host = (url: string): boolean => {
+  try {
+    const hostname = new URL(url).hostname;
+    return hostname === "302.ai" || hostname.endsWith(".302.ai");
+  } catch {
+    return false;
+  }
+};
+
+async function run302EditGeneration(input: ImageGenerationRequest): Promise<{ status: number; body: Record<string, unknown> }> {
+  try {
+    const apiKey = input.apiKey?.trim();
+    const model = input.model?.trim();
+    const prompt = input.prompt?.trim();
+    const referenceImageDataUrl = input.referenceImageDataUrl?.trim();
+
+    if (!apiKey) return { status: 400, body: { error: "缺少 API Key" } };
+    if (!model || !/^flux-2-/.test(model)) return { status: 400, body: { error: "302.AI 参考图仅支持 FLUX.2 系列模型" } };
+    if (!prompt) return { status: 400, body: { error: "缺少提示词" } };
+    if (!referenceImageDataUrl || !/^data:image\//i.test(referenceImageDataUrl)) {
+      return { status: 400, body: { error: "参考图格式无效" } };
+    }
+
+    const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+    const submitRes = await externalFetch(`https://api.302.ai/flux/v1/${model}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ prompt, input_image: referenceImageDataUrl }),
+    });
+    if (!submitRes.ok) {
+      const text = await submitRes.text().catch(() => "");
+      return { status: 502, body: { error: `生图 API错误 ${submitRes.status}: ${text.slice(0, 600)}` } };
+    }
+
+    const task = await submitRes.json() as { id?: string };
+    const taskId = task?.id;
+    if (!taskId) {
+      return { status: 502, body: { error: `生图 API返回中没有任务 ID：${JSON.stringify(task).slice(0, 300)}` } };
+    }
+
+    // 轮询等待（每 2 秒一次，最长约 100 秒；配合托管平台函数时限）。
+    for (let index = 0; index < 50; index += 1) {
+      await new Promise(resolve => setTimeout(resolve, 2_000));
+      const pollRes = await externalFetch(`https://api.302.ai/flux/v1/get_result?id=${taskId}`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${apiKey}` },
+      });
+      if (!pollRes.ok) continue;
+      const poll = await pollRes.json() as { status?: string; result?: { sample?: string } };
+      const status = poll?.status || "";
+      if (status === "Ready") {
+        const url = poll?.result?.sample;
+        if (!url) return { status: 502, body: { error: "生图任务已完成但没有图片链接" } };
+        const image = await fetchImageUrl(url);
+        return { status: 200, body: { b64: image.b64, mimeType: image.mimeType } };
+      }
+      if (status && status !== "Pending" && status !== "Processing") {
+        return { status: 502, body: { error: `生图任务失败（${status}）` } };
+      }
+    }
+    return { status: 504, body: { error: "生图超时：302.AI 编辑任务未在时限内完成，请重试" } };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const status = message.toLowerCase().includes("abort") ? 504 : 502;
+    return { status, body: { error: message } };
+  }
+}
+
 async function runImageGeneration(input: ImageGenerationRequest): Promise<{ status: number; body: Record<string, unknown> }> {
   if (input.provider === "novelai") {
     return runNovelAiGeneration(input);
@@ -307,6 +377,11 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
     if (!baseUrl) return { status: 400, body: { error: "缺少 Base URL" } };
     if (!model) return { status: 400, body: { error: "缺少模型名" } };
     if (!prompt) return { status: 400, body: { error: "缺少提示词" } };
+
+    // 302.AI：参考图（编辑）走官方异步格式通道。
+    if (hasReference && is302Host(baseUrl) && /^flux-2-/.test(model || "")) {
+      return run302EditGeneration(input);
+    }
 
     const url = buildImageUrl(baseUrl, hasReference ? "edits" : "generations");
     const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}` };

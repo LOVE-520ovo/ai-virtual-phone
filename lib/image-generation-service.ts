@@ -394,6 +394,11 @@ async function generateImageViaServerOrProxy(params: {
   referenceImageDataUrl: string | null;
   signal?: AbortSignal;
 }): Promise<ImageGenerationApiResponse> {
+  // 参考图（编辑）请求统一走服务端：编辑接口跨域支持普遍较差，
+  // 且中转站（如 302.AI）的参考图通道多为服务端专用格式，直连探测只会徒增一次失败。
+  if (params.referenceImageDataUrl) {
+    return generateImageViaServer(params);
+  }
   if (IMAGE_GEN_PROXY_URL) {
     try {
       return await generateImageDirect({ ...params, proxyBaseUrl: IMAGE_GEN_PROXY_URL });
@@ -790,7 +795,7 @@ export async function generateImageFromConfiguredApi(params: {
   throwIfAborted(params.signal);
   const prompt = mergePrompt(description, openaiSettings.extraPrompt);
 
-  const data = openaiSettings.requestMode === "direct"
+  const data = openaiSettings.requestMode === "direct" && !referenceImageDataUrl
     ? await generateImageDirect({ settings: openaiSettings, prompt, referenceImageDataUrl, signal: params.signal })
     : await generateImageViaServerOrProxy({ settings: openaiSettings, prompt, referenceImageDataUrl, signal: params.signal });
 
