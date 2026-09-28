@@ -486,14 +486,19 @@ export async function readBackupManifest(blob: Blob): Promise<BackupManifest> {
   return parseManifestFile(manifestFile);
 }
 
-export async function downloadBackupBlob(blob: Blob, manifest: BackupManifest, options: DownloadFileOptions = {}): Promise<void> {
+/**
+ * @param filenamePrefix 可选：插入到文件名日期前的自定义前缀（如档位名）。
+ *   导出档位备份时用，让文件一眼能看出属于哪个档位。
+ */
+export async function downloadBackupBlob(blob: Blob, manifest: BackupManifest, options: DownloadFileOptions = {}, filenamePrefix?: string): Promise<void> {
   const date = manifest.createdAt.replace(/[:.]/g, "-").slice(0, 19);
   const zipBlob = blob.type === "application/zip" ? blob : blob.slice(0, blob.size, "application/zip");
+  const prefix = filenamePrefix ? `${filenamePrefix}-` : "";
   // Plain .zip extension so iOS Safari's file picker recognizes the type and
   // lets the user select it for import (a custom .aiphone extension is greyed
   // out on iOS, which has no UTI for it). The backup is validated by the
   // manifest's format/version on import, not by the file extension.
-  await downloadFile(zipBlob, `ai-phone-backup-${date}.zip`, options);
+  await downloadFile(zipBlob, `ai-phone-backup-${prefix}${date}.zip`, options);
 }
 
 export async function importBackupBlob(blob: Blob, moduleIds?: DataModuleId[], options: ImportOptions = {}): Promise<ImportResult> {
